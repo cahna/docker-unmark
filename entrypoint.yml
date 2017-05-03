@@ -1,0 +1,167 @@
+---
+- hosts: localhost
+  connection: local
+  vars:
+    PHP_CONFIG_FILES:
+    UNMARK_PHP_TZ: "{{ lookup('env', 'UNMARK_PHP_TZ') | default('US/Pacific', true) }}"
+    UNMARK_DB_TZ_OFFSET: "{{ lookup('env', 'UNMARK_DB_TZ_OFFSET') | default('-08:00', true) }}"
+    UNMARK_DB_HOSTNAME: "{{ lookup('env', 'UNMARK_DB_HOSTNAME') | default('MYSQL_PORT_3306_TCP_ADDR', true) }}"
+    UNMARK_DB_USERNAME: "{{ lookup('env', 'UNMARK_DB_USERNAME') | default('', true) }}"
+    UNMARK_DB_PASSWORD: "{{ lookup('env', 'UNMARK_DB_PASSWORD') | default('', true) }}"
+    UNMARK_DB_NAME: "{{ lookup('env', 'UNMARK_DB_NAME') | default('unmark', true) }}"
+    UNMARK_DB_DEBUG: "{{ (lookup('env', 'UNMARK_DB_DEBUG') | default('TRUE', true) | upper) in ['TRUE', '1', 'YES', 'Y'] | ternary('TRUE', 'FALSE') }}"
+  tasks:
+    - name: Configure unmark
+      copy:
+        dest: /unmark/application/config/database.php
+        content: |
+          <?php  if ( ! defined('BASEPATH')) exit('No direct script access allowed');
+          $active_group = 'default';
+          $active_record = TRUE;
+          $db['default']['hostname'] = '{{ UNMARK_DB_HOSTNAME }}';
+          $db['default']['username'] = '{{ UNMARK_DB_USERNAME }}';
+          $db['default']['password'] = '{{ UNMARK_DB_PASSWORD }}';
+          $db['default']['database'] = '{{ UNMARK_DB_NAME }}';
+          $db['default']['dbdriver'] = 'mysqli';
+          $db['default']['pconnect'] = TRUE;
+          $db['default']['db_debug'] = {{ UNMARK_DB_DEBUG }};
+          $db['default']['cache_on'] = FALSE;
+          $db['default']['cachedir'] = '';
+          $db['default']['char_set'] = 'utf8';
+          $db['default']['dbcollat'] = 'utf8_general_ci';
+          $db['default']['swap_pre'] = '';
+          $db['default']['autoinit'] = TRUE;
+          $db['default']['stricton'] = FALSE;
+          $db['default']['timezone'] = '{{ UNMARK_DB_TZ_OFFSET }}';
+
+    - name: Configure supervisord
+      copy:
+        dest: /etc/supervisor/supervisord.conf
+        content: |
+          [supervisord]
+          nodaemon = true
+          logfile = /dev/null
+          logfile_maxbytes = 0
+          pidfile = /var/run/supervisord.pid
+
+          [program:php-fpm]
+          command = /usr/sbin/php-fpm7.0 --nodaemonize --fpm-config /etc/php/7.0/fpm/php-fpm.conf
+          stdout_logfile = /dev/stdout
+          stdout_logfile_maxbytes=0
+          stderr_logfile = /dev/stderr
+          stderr_logfile_maxbytes=0
+          user = root
+          autostart = true
+          autorestart = true
+          priority = 10
+          
+          [program:nginx]
+          command = /usr/sbin/nginx -g 'daemon off;'
+          stdout_logfile = /dev/stdout
+          stdout_logfile_maxbytes=0
+          stderr_logfile = /dev/stderr
+          stderr_logfile_maxbytes=0
+          user = root
+          autostart = true
+          autorestart = true
+          priority = 15
+
+    - name: configure php timezone
+      lineinfile:
+        dest: "{{ item }}"
+        regexp: ^[;\s]*date\.timezone\s+=
+        line: date.timezone = "{{ UNMARK_PHP_TZ }}"
+        state: present
+      with_items:
+        - /etc/php/7.0/fpm/php.ini
+        - /etc/php/7.0/cli/php.ini
+
+    - name: configure php-fpm
+      copy:
+        dest: /etc/php/7.0/fpm/pool.d/www.conf
+        content: |
+          [www]
+          user = www-data
+          group = www-data
+          listen = /var/run/php/php7.0-fpm.sock
+          listen.owner = www-data
+          listen.group = www-data
+          pm = dynamic
+          pm.max_children = 5
+          pm.start_servers = 2
+          pm.min_spare_servers = 1
+          pm.max_spare_servers = 3
+          pm.max_requests = 500
+          pm.status_path = /status
+          ping.path = /ping
+          ping.response = pong
+          catch_workers_output = yes
+          ;access.log = log/$pool.access.log
+          ;slowlog = log/$pool.log.slow
+          ;request_slowlog_timeout = 0
+          ;request_terminate_timeout = 0
+          ;security.limit_extensions = .php .php3 .php4 .php5 .php7
+          ;php_admin_value[sendmail_path] = /usr/sbin/sendmail -t -i -f www@my.domain.com
+          ;php_flag[display_errors] = off
+          ;php_admin_value[error_log] = /var/log/fpm-php.www.log
+          ;php_admin_flag[log_errors] = on
+          ;php_admin_value[memory_limit] = 32M
+
+          ; Chroot to this directory at the start. This value must be defined as an
+          ; absolute path. When this value is not set, chroot is not used.
+          ; Note: chrooting is a great security feature and should be used whenever
+          ;       possible. However, all PHP paths will be relative to the chroot
+          ;       (error_log, sessions.save_path, ...).
+          ;chroot = /unmark
+          
+          ; Chdir to this directory at the start.
+          ; Note: relative path can be used.
+          ;chdir = /var/www
+          
+          ; Clear environment in FPM workers
+          ; Prevents arbitrary environment variables from reaching FPM worker processes
+          ; by clearing the environment in workers before env vars specified in this
+          ; pool configuration are added.
+          ; Setting to "no" will make all environment variables available to PHP code
+          ; via getenv(), $_ENV and $_SERVER.
+          ; Default Value: yes
+          ;clear_env = no
+
+          ;env[HOSTNAME] = $HOSTNAME
+          ;env[PATH] = /usr/local/bin:/usr/bin:/bin
+          ;env[TMP] = /tmp
+          ;env[TMPDIR] = /tmp
+          ;env[TEMP] = /tmp
+
+    - name: Configure nginx
+      copy:
+        dest: /etc/nginx/conf.d/default.conf
+        content: |
+          server {
+            listen      80 default_server;
+            root        /unmark;
+            index       index.php index.html;
+            access_log  /run/php/access_log;
+            error_log   /run/php/error_log;
+
+            rewrite ^system.*      /index.php?/$1 break;
+            rewrite ^application.* /index.php?/$1 break;
+      
+            if (!-e $request_filename) {
+                rewrite ^(.*)$ /index.php?/$1 break;
+            }
+            location / {
+                try_files $uri $uri/ /index.php?$args;
+            }
+            location ~ \.php$ {
+                fastcgi_pass unix:/var/run/php/php7.0-fpm.sock;
+                try_files $uri = 404;
+                fastcgi_split_path_info ^(.+\.php)(/.+)$;
+                include /etc/nginx/fastcgi.conf;
+                fastcgi_index index.php;
+            }
+          }
+
+
+
+
